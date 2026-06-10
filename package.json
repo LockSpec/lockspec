@@ -1,6 +1,7 @@
 {
   "name": "lockspec",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "mcpName": "io.github.LockSpec/lockspec",
   "description": "MCP server that gives AI coding agents accurate, version-pinned API context from your OpenAPI contracts.",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "git+https://github.com/LockSpec/lockspec.git" },

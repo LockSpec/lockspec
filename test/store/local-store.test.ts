@@ -135,6 +135,25 @@ describe("LocalStore — persistence & content-addressing", () => {
   });
 });
 
+// FK enforcement — a LocalStore-specific invariant (no FK semantics in InMemoryStore).
+describe("LocalStore — foreign-key enforcement", () => {
+  it("rejects a spec_versions row whose spec_id has no matching specs row", () => {
+    const store = track(new LocalStore(freshRoot()));
+    // Reach the live connection directly. Note: better-sqlite3 ≥ 12.x enables
+    // foreign_keys by default, so LocalStore's explicit pragma is belt-and-suspenders;
+    // this test locks the behavioral contract regardless of library-default changes.
+    const db = (store as unknown as { db: Database.Database }).db;
+    const insert = db.prepare(
+      `INSERT INTO spec_versions
+         (version_id, spec_id, content_hash, version_label, spec_format, format_version, provenance, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    expect(() =>
+      insert.run("v-orphan", "no-such-spec", "hash-x", null, "openapi", "3.1.0", "{}", "2026-06-10T00:00:00.000Z"),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+});
+
 // FTS5 search index — a LocalStore-internal detail (not in the Store contract).
 // Inspected directly via a second raw better-sqlite3 handle to the same root,
 // since the column design is what search ranking depends on.

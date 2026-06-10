@@ -4,13 +4,12 @@ import {
   resolvePointer,
   isObj,
   asObj,
-  asArray,
   refTarget,
   deref,
   stripSuffix,
-  parentPointer,
   type Obj,
 } from "./json-pointer.js";
+import { mergeParameters } from "./params.js";
 
 export interface SignatureOptions {
   /** Default true. False → schemas keep their $refs intact (no inlining). */
@@ -68,9 +67,8 @@ export function buildSignature(
     truncated: [],
   };
   const binding = operation.openapi!; // present for spec_format === "openapi" (v1)
-  const { params: paramsPtr, requestBody: rbPtr, responses: respPtr } = binding.pointers;
-  const opBase = stripSuffix(paramsPtr, "/parameters"); // /paths/<path>/<method>
-  const pathItemPtr = parentPointer(opBase); // /paths/<path>
+  const { requestBody: rbPtr, responses: respPtr } = binding.pointers;
+  const opBase = stripSuffix(binding.pointers.params, "/parameters"); // /paths/<path>/<method>
   const opObj = asObj(resolvePointer(doc, opBase));
 
   const sig: BuiltSignature = {
@@ -79,7 +77,7 @@ export function buildSignature(
     operation_id: operation.operation_id,
     summary: operation.summary ?? null,
     deprecated: operation.deprecated,
-    parameters: buildParameters(ctx, pathItemPtr, paramsPtr),
+    parameters: buildParameters(ctx, operation),
     responses: buildResponses(ctx, respPtr),
     truncated_paths: ctx.truncated,
   };
@@ -90,27 +88,16 @@ export function buildSignature(
   return sig;
 }
 
-// Merge path-level parameters (shared across methods) with op-level, keyed by
-// (name, in); op-level overrides (OpenAPI Path Item Object).
-function buildParameters(ctx: Ctx, pathItemPtr: string, paramsPtr: string): SignatureParam[] {
-  const raw = [
-    ...asArray(resolvePointer(ctx.doc, `${pathItemPtr}/parameters`)),
-    ...asArray(resolvePointer(ctx.doc, paramsPtr)),
-  ];
-  const byKey = new Map<string, Obj>();
-  for (const entry of raw) {
-    const p = asObj(deref(ctx.doc, entry));
-    if (!p || typeof p.name !== "string" || typeof p.in !== "string") continue;
-    byKey.set(`${p.in} ${p.name}`, p);
-  }
-  return [...byKey.values()].map((p, i) => {
+function buildParameters(ctx: Ctx, operation: Operation): SignatureParam[] {
+  // Map-iteration index i drives /parameters/${i}/schema — independent of MergedParam.base.
+  return [...mergeParameters(ctx.doc, operation).values()].map((m, i) => {
     const param: SignatureParam = {
-      name: p.name as string,
-      in: p.in as string,
-      required: p.required === true || p.in === "path",
-      schema: expand(ctx, p.schema, new Set(), 0, `/parameters/${i}/schema`),
+      name: m.name,
+      in: m.in,
+      required: m.required,
+      schema: expand(ctx, m.param.schema, new Set(), 0, `/parameters/${i}/schema`),
     };
-    if (typeof p.description === "string") param.description = p.description;
+    if (typeof m.param.description === "string") param.description = m.param.description;
     return param;
   });
 }

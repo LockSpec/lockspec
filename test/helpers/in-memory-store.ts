@@ -133,6 +133,18 @@ export class InMemoryStore implements Store {
     return this.snapshots.get(content_hash);
   }
 
+  countOperations(spec_id: string, version_id: string): number {
+    return this.getOperations(spec_id, version_id).length;
+  }
+
+  countTypeDefs(spec_id: string, version_id: string): number {
+    return this.getTypeDefs(spec_id, version_id).length;
+  }
+
+  hasSnapshot(content_hash: string): boolean {
+    return this.snapshots.has(content_hash);
+  }
+
   getOperations(spec_id: string, version_id: string): Operation[] {
     return this.operations.get(rowKey(spec_id, version_id)) ?? [];
   }

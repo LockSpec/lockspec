@@ -47,11 +47,12 @@ CREATE TABLE IF NOT EXISTS operations (
   PRIMARY KEY (spec_id, version_id, operation_key)
 );
 CREATE TABLE IF NOT EXISTS typedefs (
-  spec_id    TEXT NOT NULL,
-  version_id TEXT NOT NULL,
-  name       TEXT NOT NULL,
-  kind       TEXT NOT NULL,
-  pointer    TEXT NOT NULL,
+  spec_id     TEXT NOT NULL,
+  version_id  TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  pointer     TEXT NOT NULL,
+  description TEXT,
   PRIMARY KEY (spec_id, version_id, name)
 );
 -- FTS5 index over operations for find_endpoint's BM25 pass.
@@ -99,6 +100,7 @@ interface TdRow {
   name: string;
   kind: string;
   pointer: string;
+  description: string | null;
 }
 
 function toSpec(r: SpecRow): Spec {
@@ -136,7 +138,7 @@ function toOperation(r: OpRow): Operation {
   };
 }
 function toTypeDef(r: TdRow): TypeDef {
-  return { spec_id: r.spec_id, version_id: r.version_id, name: r.name, kind: r.kind, pointer: r.pointer };
+  return { spec_id: r.spec_id, version_id: r.version_id, name: r.name, kind: r.kind, pointer: r.pointer, description: r.description ?? null };
 }
 
 export class LocalStore implements Store {
@@ -266,6 +268,24 @@ export class LocalStore implements Store {
   loadSnapshot(content_hash: string): NormalizedDoc | undefined {
     const path = this.snapshotPath(content_hash);
     return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as NormalizedDoc) : undefined;
+  }
+
+  countOperations(spec_id: string, version_id: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM operations WHERE spec_id = ? AND version_id = ?")
+      .get(spec_id, version_id) as { n: number };
+    return row.n;
+  }
+
+  countTypeDefs(spec_id: string, version_id: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM typedefs WHERE spec_id = ? AND version_id = ?")
+      .get(spec_id, version_id) as { n: number };
+    return row.n;
+  }
+
+  hasSnapshot(content_hash: string): boolean {
+    return existsSync(this.snapshotPath(content_hash));
   }
 
   getOperations(spec_id: string, version_id: string): Operation[] {
@@ -400,10 +420,10 @@ export class LocalStore implements Store {
 
   private insertTypeDefs(typeDefs: TypeDef[]): void {
     const insertTd = this.db.prepare(
-      "INSERT INTO typedefs (spec_id, version_id, name, kind, pointer) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO typedefs (spec_id, version_id, name, kind, pointer, description) VALUES (?, ?, ?, ?, ?, ?)",
     );
     for (const td of typeDefs) {
-      insertTd.run(td.spec_id, td.version_id, td.name, td.kind, td.pointer);
+      insertTd.run(td.spec_id, td.version_id, td.name, td.kind, td.pointer, td.description);
     }
   }
 }

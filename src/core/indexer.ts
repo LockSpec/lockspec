@@ -75,6 +75,7 @@ function indexTypeDefs(root: Obj, ctx: IndexContext): TypeDef[] {
       name,
       kind: deriveKind(schema),
       pointer: `/components/schemas/${escapePointer(name)}`,
+      description: isObj(schema) && typeof schema.description === "string" ? schema.description : null,
     });
   }
   return typeDefs;

@@ -3,7 +3,7 @@ import { validateCallInputSchema, validateCallInputSchemaRefined } from "../sche
 import { OPERATION_REF_MESSAGE } from "../schemas/operation_ref.js";
 import { fail, toCallToolResult, toErrorResult, snapshotMissing } from "./result.js";
 import { resolveTarget, locateOperation } from "../core/resolver.js";
-import { createSpecValidator, validateBody, validateParams, type DraftParams, type Violation, type SpecValidator } from "../core/validator.js";
+import { validatorFor, validateBody, validateParams, type DraftParams, type Violation, type SpecValidator } from "../core/validator.js";
 import type { ValidateFunction } from "ajv/dist/2020.js";
 import type { Operation } from "../store/store.js";
 
@@ -38,7 +38,7 @@ function handle(args: unknown, deps: ToolDeps) {
   let errors: Violation[];
   let warnings: string[];
   try {
-    const validator = createSpecValidator(doc);
+    const validator = validatorFor(version.content_hash, doc);
     const ctMap = validator.compileBody(operation);
     const paramFns = validator.compileParams(operation);
     const body = validateRequestBody(validator, operation, ctMap, input.request);

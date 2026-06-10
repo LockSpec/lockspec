@@ -189,8 +189,8 @@ describe("searchEndpoints — limit & output shape", () => {
 
 // searchTypes: name-only ranking over TypeDefs (exact > prefix > fuzzy;
 // no FTS — a TypeDef carries no rich text). All in-memory; no LocalStore needed.
-function td(name: string, kind = "object"): TypeDef {
-  return { spec_id: SPEC, version_id: VER, name, kind, pointer: `/components/schemas/${name}` };
+function td(name: string, kind = "object", description: string | null = null): TypeDef {
+  return { spec_id: SPEC, version_id: VER, name, kind, pointer: `/components/schemas/${name}`, description };
 }
 function seedTypes(typeDefs: TypeDef[]): InMemoryStore {
   const store = new InMemoryStore();
@@ -243,14 +243,45 @@ describe("searchTypes — name-based ranking", () => {
     expect(findT(store, { query: "   " })).toEqual({ results: [], truncated: false });
   });
 
-  it("rows carry the compact type fields (name, kind, score) with score in (0,1]", () => {
+  it("rows carry the compact type fields (name, kind, description, score) with score in (0,1]", () => {
     const store = seedTypes([td("Status", "enum")]);
     const row = findT(store, { query: "Status" }).results[0]!;
-    expect(row).toEqual({ name: "Status", kind: "enum", score: 1 });
+    expect(row).toEqual({ name: "Status", kind: "enum", description: null, score: 1 });
   });
 
   it("no match → empty results, not truncated", () => {
     const store = seedTypes([td("Invoice")]);
     expect(findT(store, { query: "zzz-nothing" })).toEqual({ results: [], truncated: false });
+  });
+});
+
+describe("searchTypes — description matching", () => {
+  // A realistic multi-sentence description: a whole-string trigram match against
+  // it falls below FUZZY_THRESHOLD, so the term must be matched token-level.
+  const DESC =
+    "Represents a customer-facing receipt issued after a successful payment. " +
+    "Carries the line items, totals, and tax breakdown for reconciliation.";
+
+  it("a term present only in the description (absent from the name) surfaces the type", () => {
+    const store = seedTypes([td("Ledger", "object", DESC), td("Customer")]);
+    const names = findT(store, { query: "reconciliation" }).results.map((r) => r.name);
+    expect(names).toContain("Ledger");
+  });
+
+  it("the matched description is returned in the row", () => {
+    const store = seedTypes([td("Ledger", "object", DESC)]);
+    const row = findT(store, { query: "reconciliation" }).results[0]!;
+    expect(row.name).toBe("Ledger");
+    expect(row.description).toBe(DESC);
+  });
+
+  it("name stays the strong tier: a name hit outranks a description-only hit", () => {
+    // "Invoice" is the name of one type and a description term of another.
+    const store = seedTypes([
+      td("Invoice"),
+      td("Receipt", "object", "An invoice issued to the customer at checkout."),
+    ]);
+    const names = findT(store, { query: "Invoice" }).results.map((r) => r.name);
+    expect(names.indexOf("Invoice")).toBeLessThan(names.indexOf("Receipt"));
   });
 });

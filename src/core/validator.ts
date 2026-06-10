@@ -8,16 +8,8 @@ import type { NormalizedDoc, Operation } from "../store/store.js";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import addFormatsImport, { type FormatsPlugin } from "ajv-formats";
 
-import {
-  escapePointer,
-  resolvePointer,
-  isObj,
-  refTarget,
-  deref,
-  stripSuffix,
-  parentPointer,
-  type Obj,
-} from "./json-pointer.js";
+import { escapePointer, resolvePointer, isObj, refTarget, deref, type Obj } from "./json-pointer.js";
+import { mergeParameters } from "./params.js";
 
 // ajv-formats is CommonJS with a callable default export; NodeNext's default-
 // import interop types it as the module namespace, so cast to the (callable)
@@ -75,11 +67,16 @@ export interface DraftParams {
 
 /** Run the per-`in` param validate-fns against a draft request's params and
  *  return ALL violations. A missing `in`-group is validated as `{}`, so
- *  missing-required still fires. */
+ *  missing-required still fires. Header instance keys are lowercased to match
+ *  the normalized schema properties (HTTP header names are case-insensitive). */
 export function validateParams(compiled: Map<string, ValidateFunction>, params: DraftParams): Violation[] {
   const out: Violation[] = [];
   for (const [loc, fn] of compiled) {
-    const instance = (params as Record<string, unknown>)[loc] ?? {};
+    const raw = (params as Record<string, unknown>)[loc] ?? {};
+    const instance =
+      loc === "header"
+        ? Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([k, v]) => [k.toLowerCase(), v]))
+        : raw;
     if (fn(instance)) continue;
     for (const e of fn.errors ?? []) out.push(mapError(e, instance, loc as ViolationLocation));
   }
@@ -135,6 +132,23 @@ const fmtType = (t: unknown): string => (Array.isArray(t) ? t.join("|") : String
 // $refs (`#/components/schemas/...`, document-relative) resolve against it.
 const DOC_ID = "lockspec://spec";
 
+// content_hash → its compiled validator. content_hash is immutable (a hash never
+// maps to two docs), so a cached validator is never stale — no invalidation. The
+// cost is process-lifetime memory: one Ajv per content_hash ever validated, never
+// evicted — acceptable for a single-writer, short-lived MCP process.
+const validatorCache = new Map<string, SpecValidator>();
+
+/** Memoized `createSpecValidator` keyed by the snapshot's `content_hash`. Reuses
+ *  the compiled validator across validate_call invocations against the same
+ *  immutable version. */
+export function validatorFor(content_hash: string, doc: NormalizedDoc): SpecValidator {
+  const cached = validatorCache.get(content_hash);
+  if (cached !== undefined) return cached;
+  const validator = createSpecValidator(doc);
+  validatorCache.set(content_hash, validator);
+  return validator;
+}
+
 export function createSpecValidator(doc: NormalizedDoc): SpecValidator {
   // strict:false — tolerate OpenAPI vocabulary (discriminator/xml/externalDocs).
   // allErrors:true — collect every violation.
@@ -179,42 +193,33 @@ export function createSpecValidator(doc: NormalizedDoc): SpecValidator {
     },
 
     compileParams(operation: Operation): Map<string, ValidateFunction> {
-      const paramsPtr = operation.openapi?.pointers.params;
-      if (paramsPtr === undefined) return new Map();
-      const opBase = stripSuffix(paramsPtr, "/parameters"); // /paths/<path>/<method>
-      const pathItemParamsPtr = `${parentPointer(opBase)}/parameters`; // path-item shared params
+      if (operation.openapi?.pointers.params === undefined) return new Map();
 
-      // Merge path-item + op params, keyed by (in, name); op last → op wins on a
-      // collision (OpenAPI Path Item Object rule). Each param records the pointer to
-      // its value schema for a $ref into the registered doc.
       interface PInfo { name: string; in: string; required: boolean; schemaUri?: string }
-      const byKey = new Map<string, PInfo>();
-      const collect = (arrayPtr: string): void => {
-        const arr = resolvePointer(doc, arrayPtr);
-        if (!Array.isArray(arr)) return;
-        arr.forEach((entry, i) => {
-          // A param entry may be a structural $ref; resolve one hop to read it.
-          const ref = refTarget(entry);
-          const p = deref(doc, entry);
-          if (!isObj(p) || typeof p.name !== "string" || typeof p.in !== "string") return;
-          const base = ref !== undefined ? ref.slice(1) : `${arrayPtr}/${i}`;
-          byKey.set(`${p.in} ${p.name}`, {
-            name: p.name,
-            in: p.in,
-            required: p.required === true || p.in === "path",
-            // No `schema` → presence only; property becomes `{}` (accept any).
-            schemaUri: p.schema !== undefined ? `${DOC_ID}#${base}/schema` : undefined,
-          });
-        });
-      };
-      collect(pathItemParamsPtr);
-      collect(paramsPtr);
-
       const groups = new Map<string, PInfo[]>();
-      for (const info of byKey.values()) {
-        const g = groups.get(info.in);
+      for (const m of mergeParameters(doc, operation).values()) {
+        // Params carry their schema under either `schema` (direct) or
+        // `content[mediaType].schema` (serialized-object form; the two are mutually
+        // exclusive per OpenAPI). A content object MUST have exactly one entry.
+        let schemaUri: string | undefined;
+        if (m.param.schema !== undefined) {
+          schemaUri = `${DOC_ID}#${m.base}/schema`;
+        } else if (isObj(m.param.content)) {
+          const ct = Object.keys(m.param.content as object)[0];
+          const media = ct !== undefined ? (m.param.content as Record<string, unknown>)[ct] : undefined;
+          if (ct !== undefined && isObj(media) && (media as Record<string, unknown>).schema !== undefined) {
+            schemaUri = `${DOC_ID}#${m.base}/content/${escapePointer(ct)}/schema`;
+          }
+        }
+        const info: PInfo = {
+          name: m.name,
+          in: m.in,
+          required: m.required,
+          schemaUri,
+        };
+        const g = groups.get(m.in);
         if (g) g.push(info);
-        else groups.set(info.in, [info]);
+        else groups.set(m.in, [info]);
       }
 
       // One synthetic object schema per `in`-group. Build path+query always (so an
@@ -227,8 +232,12 @@ export function createSpecValidator(doc: NormalizedDoc): SpecValidator {
         const properties: Obj = {};
         const required: string[] = [];
         for (const m of members) {
-          properties[m.name] = m.schemaUri !== undefined ? { $ref: m.schemaUri } : {};
-          if (m.required) required.push(m.name);
+          // Header names are case-insensitive; lowercase both the property key and
+          // required entry so they match the normalized instance keys from toDraftParams.
+          // Violation messages/pointers will use the lowercased form — acceptable.
+          const key = inValue === "header" ? m.name.toLowerCase() : m.name;
+          properties[key] = m.schemaUri !== undefined ? { $ref: m.schemaUri } : {};
+          if (m.required) required.push(key);
         }
         result.set(inValue, ajv.compile({ type: "object", properties, required, additionalProperties: !reportsUnknown(inValue) }));
       }

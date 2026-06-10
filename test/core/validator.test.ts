@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createSpecValidator, validateBody, validateParams, type Violation, type DraftParams } from "../../src/core/validator.js";
+import { createSpecValidator, validatorFor, validateBody, validateParams, type Violation, type DraftParams } from "../../src/core/validator.js";
 import { normalize } from "../../src/core/normalizer.js";
 import { escapePointer } from "../../src/core/json-pointer.js";
 import type { NormalizedDoc, Operation } from "../../src/store/store.js";
@@ -29,6 +29,19 @@ function makeOp(method: string, path: string, over: Partial<Operation> = {}): Op
     ...over,
   };
 }
+
+describe("validatorFor — content_hash-keyed cache", () => {
+  it("returns the same validator instance for a given content_hash, a different one for another", async () => {
+    const doc30 = await docOf("clean/petstore-3.0.yaml");
+    const doc31 = await docOf("clean/petstore-3.1.yaml");
+
+    // Same hash → identical instance (compiled once, reused). content_hash is
+    // immutable, so there is no invalidation hazard.
+    expect(validatorFor("hash-a", doc30)).toBe(validatorFor("hash-a", doc30));
+    // Different hash → a distinct validator.
+    expect(validatorFor("hash-a", doc30)).not.toBe(validatorFor("hash-b", doc31));
+  });
+});
 
 describe("createSpecValidator.compileBody — both versions compile", () => {
   it("compiles the 3.0-origin petstore POST /pets body schema", async () => {
@@ -316,10 +329,12 @@ describe("validateParams — param validation", () => {
       { location: "path", pointer: "/extra", code: "unknown_param", message: "Unknown path parameter 'extra'." },
     ]);
     // header: declared value validated + extras allowed (no unknown), required still enforced.
+    // Header names are case-insensitive: instance keys are lowercased before validation;
+    // violation pointers/messages use the normalized (lowercased) name.
     const h = paramsDoc({ opParams: [{ name: "X-Trace", in: "header", required: true, schema: { type: "string" } }] });
     expect(validateParamsFor(h, { header: { "X-Trace": "abc", Authorization: "Bearer z" } })).toEqual([]);
     expect(validateParamsFor(h, { header: {} })).toEqual([
-      { location: "header", pointer: "/X-Trace", code: "required", message: "Missing required header parameter 'X-Trace'." },
+      { location: "header", pointer: "/x-trace", code: "required", message: "Missing required header parameter 'x-trace'." },
     ]);
     // cookie: extras allowed too.
     const c = paramsDoc({ opParams: [{ name: "sid", in: "cookie", schema: { type: "string" } }] });
@@ -366,13 +381,40 @@ describe("validateParams — param validation", () => {
     expect(vs).toContainEqual({ location: "query", pointer: "/b", code: "required", message: "Missing required query parameter 'b'." });
   });
 
-  it("schemaless/content-typed param → no compile throw; presence checked, value not", () => {
+  it("content-typed param → presence checked AND value checked against its schema", () => {
+    // Previously this test pinned a known limitation: content-typed params had
+    // their values passed through unchecked. That limitation is now closed —
+    // compileParams extracts the schema from param.content[ct].schema.
     const doc = paramsDoc({ opParams: [
       { name: "filter", in: "query", required: true, content: { "application/json": { schema: { type: "object" } } } },
     ] });
     expect(validateParamsFor(doc, { query: {} })).toEqual([
       { location: "query", pointer: "/filter", code: "required", message: "Missing required query parameter 'filter'." },
     ]);
-    expect(validateParamsFor(doc, { query: { filter: 12345 } })).toEqual([]); // value not checked (no schema)
+    // 12345 is not an object — type violation must fire (value is now checked).
+    expect(validateParamsFor(doc, { query: { filter: 12345 } })).toEqual([
+      { location: "query", pointer: "/filter", code: "type", message: "Expected object, got integer.", expected: "object", actual: "integer" },
+    ]);
+    // Valid value (an actual object) → no errors.
+    expect(validateParamsFor(doc, { query: { filter: { key: "val" } } })).toEqual([]);
+  });
+
+  it("Pin A: $ref'd parameter ENTRY → schema resolved from component; enum violation fires", () => {
+    // The parameter array element is itself a {$ref} pointing to components.parameters.
+    // validator.compileParams must use base = "components/parameters/Status" (not array index 0)
+    // so schemaUri = DOC_ID + "#/components/parameters/Status/schema" → the real enum schema.
+    const doc = paramsDoc({
+      opParams: [{ $ref: "#/components/parameters/Status" }],
+      components: {
+        schemas: {},
+        parameters: {
+          Status: { name: "status", in: "query", schema: { type: "string", enum: ["active", "closed"] } },
+        },
+      },
+    });
+    expect(validateParamsFor(doc, { query: { status: "bogus" } })).toEqual([
+      { location: "query", pointer: "/status", code: "enum", message: "Value is not one of the allowed values [active, closed].", expected: ["active", "closed"], actual: "bogus" },
+    ]);
+    expect(validateParamsFor(doc, { query: { status: "active" } })).toEqual([]);
   });
 });

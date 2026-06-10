@@ -138,6 +138,38 @@ describe("buildSignature — parameter merge (path-level + op-level)", () => {
     expect(idParam.schema).toEqual({ type: "integer" }); // op wins
     expect(buildSignature(override, op).parameters).toHaveLength(1); // not duplicated
   });
+
+  it("Pin C: path param without required key → required forced to true in signature output", () => {
+    const pinCDoc = {
+      openapi: "3.1.0",
+      paths: { "/items/{id}": { get: { operationId: "getItem", parameters: [{ name: "id", in: "path", schema: { type: "string" } }], responses: { "200": { description: "OK" } } } } },
+      components: { schemas: {} },
+    };
+    const idParam = buildSignature(pinCDoc, makeOp("GET", "/items/{id}", { operation_id: "getItem" })).parameters.find((p) => p.name === "id")!;
+    expect(idParam.required).toBe(true);
+  });
+
+  it("Pin D: parameter ORDER is path-item-first then op-level in sequence", () => {
+    const pinDDoc = {
+      openapi: "3.1.0",
+      paths: {
+        "/items/{id}": {
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          get: {
+            operationId: "getItemOrdered",
+            parameters: [
+              { name: "verbose", in: "query", schema: { type: "boolean" } },
+              { name: "format", in: "query", schema: { type: "string" } },
+            ],
+            responses: { "200": { description: "OK" } },
+          },
+        },
+      },
+      components: { schemas: {} },
+    };
+    const sig = buildSignature(pinDDoc, makeOp("GET", "/items/{id}", { operation_id: "getItemOrdered" }));
+    expect(sig.parameters.map((p) => p.name)).toEqual(["id", "verbose", "format"]);
+  });
 });
 
 describe("buildSignature — ref expansion edges", () => {

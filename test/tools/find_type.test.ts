@@ -66,8 +66,24 @@ describe("find_type — results", () => {
     expect(p.ok).toBe(true);
     expect(p.spec_id).toBe("billing");
     expect(p.version_id).toBeDefined();
-    expect(p.results[0]).toEqual({ name: "Invoice", kind: "object", score: 1 });
+    expect(p.results[0]).toEqual({ name: "Invoice", kind: "object", description: null, score: 1 });
     expect(p.truncated).toBe(false);
+  });
+
+  it("matches a term in a schema's description and returns the description in the row", async () => {
+    const store = new InMemoryStore();
+    await load(
+      store,
+      BILLING.replace(
+        "    Customer:\n      type: object",
+        "    Customer:\n      type: object\n      description: The party billed for reconciliation purposes.",
+      ),
+    );
+    const p = payloadOf(await find(store, { query: "reconciliation" }));
+    expect(p.ok).toBe(true);
+    const row = p.results.find((r: { name: string }) => r.name === "Customer");
+    expect(row).toBeDefined();
+    expect(row.description).toBe("The party billed for reconciliation purposes.");
   });
 
   it("a query that matches nothing → ok:true with empty results", async () => {

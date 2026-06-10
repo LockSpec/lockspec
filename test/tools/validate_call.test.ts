@@ -155,6 +155,51 @@ describe("validate_call — ok-vs-valid + end-to-end", () => {
   });
 });
 
+describe("validate_call — header-name case-insensitivity", () => {
+  it("R8a: required header sent in different case matches (no false required violation)", async () => {
+    const store = new InMemoryStore();
+    await loadInline(store, inlineSpec("R8 Headers", {
+      "/h": {
+        get: {
+          operationId: "headerOp",
+          parameters: [
+            { name: "X-Request-Id", in: "header", required: true, schema: { type: "string", enum: ["alpha", "beta"] } },
+          ],
+          responses: { "200": { description: "OK" } },
+        },
+      },
+    }));
+    // Spec declares `X-Request-Id`; draft sends `x-request-id` (lowercase).
+    // After fix: names are normalized → header is found (no false required), bad value triggers enum violation.
+    const p = payloadOf(await vc(store, { operation_id: "headerOp", request: { headers: { "x-request-id": "wrong" } } }));
+    expect(p.ok).toBe(true);
+    expect(p.valid).toBe(false);
+    // No false required — the header was provided, just in different case.
+    expect(p.errors.find((e: any) => e.code === "required")).toBeUndefined();
+    // Value "wrong" does not match enum → enum violation.
+    expect(p.errors).toContainEqual(expect.objectContaining({ location: "header", code: "enum" }));
+  });
+
+  it("R8b: required header present in exact case → valid", async () => {
+    const store = new InMemoryStore();
+    await loadInline(store, inlineSpec("R8b Headers", {
+      "/h": {
+        get: {
+          operationId: "headerOpB",
+          parameters: [
+            { name: "X-Request-Id", in: "header", required: true, schema: { type: "string", enum: ["alpha", "beta"] } },
+          ],
+          responses: { "200": { description: "OK" } },
+        },
+      },
+    }));
+    const p = payloadOf(await vc(store, { operation_id: "headerOpB", request: { headers: { "X-Request-Id": "alpha" } } }));
+    expect(p.ok).toBe(true);
+    expect(p.valid).toBe(true);
+    expect(p.errors).toEqual([]);
+  });
+});
+
 describe("validate_call — strict multi-version", () => {
   // Same title → same spec_id slug; different content → two coexisting versions,
   // newest active. validate_call is the pre-finalize gate → strict on version-omitted.

@@ -42,6 +42,7 @@ function sampleTypeDef(over: Partial<TypeDef> = {}): TypeDef {
     name: "Invoice",
     kind: "object",
     pointer: "/components/schemas/Invoice",
+    description: "A billing invoice record.",
     ...over,
   };
 }
@@ -105,6 +106,10 @@ export function describeStoreContract(
       expect(store.getTypeDefs("billing-api", "v1").map((t) => t.name)).toEqual([
         "Invoice",
       ]);
+      // The schema description round-trips so find_type can match on it.
+      expect(store.getTypeDefs("billing-api", "v1")[0]!.description).toBe(
+        "A billing invoice record.",
+      );
     });
 
     it("reindexVersion replaces a version's index rows (backfill path), not appends", () => {
@@ -259,6 +264,27 @@ export function describeStoreContract(
 
       // Last (only) reference gone → the snapshot file is reclaimed.
       expect(store.loadSnapshot("hash-aaa")).toBeUndefined();
+    });
+
+    it("countOperations / countTypeDefs return index-row counts per version", () => {
+      const store = makeStore();
+      store.putVersion(sampleInput()); // 1 operation, 1 typedef for billing-api v1
+
+      expect(store.countOperations("billing-api", "v1")).toBe(1);
+      expect(store.countTypeDefs("billing-api", "v1")).toBe(1);
+
+      // Missing version_id or spec_id → 0, not an error.
+      expect(store.countOperations("billing-api", "missing-version")).toBe(0);
+      expect(store.countTypeDefs("missing-spec", "v1")).toBe(0);
+    });
+
+    it("hasSnapshot reflects snapshot presence by content_hash", () => {
+      const store = makeStore();
+
+      expect(store.hasSnapshot("hash-aaa")).toBe(false);
+      store.writeSnapshot("hash-aaa", { openapi: "3.1.0", paths: {} });
+      expect(store.hasSnapshot("hash-aaa")).toBe(true);
+      expect(store.hasSnapshot("hash-other")).toBe(false);
     });
 
     it("snapshot GC is by global ref-count: survives while another spec references the hash", () => {

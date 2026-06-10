@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { diffOperations, diffTypes, classifyDiff, type VersionSide, type DiffSummary, type DiffOptions } from "../../src/core/differ.js";
+import { diffOperations, diffTypes, classifyDiff, classifyTypes, type VersionSide, type DiffSummary, type DiffOptions } from "../../src/core/differ.js";
 import { normalize } from "../../src/core/normalizer.js";
 import { escapePointer } from "../../src/core/json-pointer.js";
 import type { NormalizedDoc, Operation, TypeDef } from "../../src/store/store.js";
@@ -244,9 +244,180 @@ describe("diffOperations — change itemization", () => {
   });
 });
 
+describe("diffOperations — recursive request-body schema diff (#6)", () => {
+  const bodyOf = (schema: unknown) => ({ required: true, content: { "application/json": { schema } } });
+  const post = (from: unknown, to: unknown) => {
+    const fromSide = side({ "/a": { post: { operationId: "createA", requestBody: bodyOf(from), ...ok } } });
+    const toSide = side({ "/a": { post: { operationId: "createA", requestBody: bodyOf(to), ...ok } } });
+    return diffOperations(fromSide, toSide).changed[0]?.changes ?? [];
+  };
+  const obj = (properties: Record<string, unknown>, required?: string[]) => ({ type: "object", properties, ...(required ? { required } : {}) });
+
+  it("a type change on a NESTED object property → type_changed with a deep pointer", () => {
+    const from = obj({ user: obj({ age: { type: "string" } }) });
+    const to = obj({ user: obj({ age: { type: "integer" } }) });
+    expect(post(from, to)).toContainEqual({ kind: "type_changed", pointer: "/user/age", from: "string", to: "integer" });
+  });
+
+  it("a field added/removed on a nested object → request_field_added/removed with a deep pointer", () => {
+    const from = obj({ user: obj({ name: { type: "string" } }) });
+    const to = obj({ user: obj({ name: { type: "string" }, email: { type: "string" } }) });
+    expect(post(from, to)).toContainEqual({ kind: "request_field_added", pointer: "/user/email", required: false });
+    expect(post(to, from)).toContainEqual({ kind: "request_field_removed", pointer: "/user/email", required: false });
+  });
+
+  it("a required-flip on a nested field → required_added/removed with a deep pointer", () => {
+    const from = obj({ user: obj({ age: { type: "integer" } }) });
+    const to = obj({ user: obj({ age: { type: "integer" } }, ["age"]) });
+    expect(post(from, to)).toContainEqual({ kind: "required_added", pointer: "/user/age" });
+    expect(post(to, from)).toContainEqual({ kind: "required_removed", pointer: "/user/age" });
+  });
+
+  it("a property whose $ref target changes → ref_changed carrying from/to ref strings", () => {
+    const from = obj({ pet: { $ref: "#/components/schemas/Cat" } });
+    const to = obj({ pet: { $ref: "#/components/schemas/Dog" } });
+    expect(post(from, to)).toContainEqual({ kind: "ref_changed", pointer: "/pet", from: "#/components/schemas/Cat", to: "#/components/schemas/Dog" });
+  });
+
+  it("a property reshaped between $ref and inline → ref_changed with a null on the inline side", () => {
+    const from = obj({ pet: { $ref: "#/components/schemas/Cat" } });
+    const to = obj({ pet: { type: "object" } });
+    expect(post(from, to)).toContainEqual({ kind: "ref_changed", pointer: "/pet", from: "#/components/schemas/Cat", to: null });
+  });
+
+  it("a property with the SAME $ref on both sides → no ref_changed (the type dimension owns it)", () => {
+    // The op is changed for another reason (a sibling field) so it enters `changed`;
+    // the unchanged $ref property must not itemize.
+    const from = obj({ pet: { $ref: "#/components/schemas/Cat" }, n: { type: "string" } });
+    const to = obj({ pet: { $ref: "#/components/schemas/Cat" }, n: { type: "integer" } });
+    const changes = post(from, to);
+    expect(changes.find((c) => c.pointer === "/pet")).toBeUndefined();
+    expect(changes).toContainEqual({ kind: "type_changed", pointer: "/n", from: "string", to: "integer" });
+  });
+
+  it("recursion is depth-bounded: a within-bound deep change itemizes; a far-deeper one does not (op still changed)", () => {
+    // Build a chain `l0.l1...lN.leaf`. A shallow change is itemized at its full
+    // pointer; a change far below the depth cap is not itemized, but the op is
+    // still flagged changed by the canonical compare (never silently dropped).
+    const chain = (depth: number, leaf: unknown): unknown => {
+      let node: unknown = leaf;
+      for (let i = depth; i >= 0; i--) node = obj({ [`l${i}`]: node });
+      return node;
+    };
+    const shallowFrom = chain(2, obj({ leaf: { type: "string" } }));
+    const shallowTo = chain(2, obj({ leaf: { type: "integer" } }));
+    expect(post(shallowFrom, shallowTo)).toContainEqual({ kind: "type_changed", pointer: "/l0/l1/l2/leaf", from: "string", to: "integer" });
+
+    const deepFrom = chain(9, obj({ leaf: { type: "string" } }));
+    const deepTo = chain(9, obj({ leaf: { type: "integer" } }));
+    const deepChanges = post(deepFrom, deepTo);
+    expect(deepChanges.find((c) => c.pointer.endsWith("/leaf"))).toBeUndefined();
+    const fromSide = side({ "/a": { post: { operationId: "createA", requestBody: bodyOf(deepFrom), ...ok } } });
+    const toSide = side({ "/a": { post: { operationId: "createA", requestBody: bodyOf(deepTo), ...ok } } });
+    expect(diffOperations(fromSide, toSide).changed.map((c) => c.operation_key)).toContain("POST:/a");
+  });
+});
+
+describe("diffOperations — array-valued `type` equality (no false-positive type_changed)", () => {
+  const obj = (properties: Record<string, unknown>, required?: string[]) => ({ type: "object", properties, ...(required ? { required } : {}) });
+  const bodyOf = (schema: unknown) => ({ required: true, content: { "application/json": { schema } } });
+
+  it("an unchanged union/nullable field (`type:[...]`) is not flagged type_changed", () => {
+    // `["string","null"]` is two distinct array objects across the two docs;
+    // a reference compare would spuriously flag it breaking.
+    const from = obj({ a: { type: ["string", "null"] }, b: { type: "string" } });
+    const to = obj({ a: { type: ["string", "null"] }, b: { type: "integer" } });
+    const fromSide = side({ "/a": { post: { operationId: "createA", requestBody: bodyOf(from), ...ok } } });
+    const toSide = side({ "/a": { post: { operationId: "createA", requestBody: bodyOf(to), ...ok } } });
+    const changes = diffOperations(fromSide, toSide).changed[0]!.changes;
+    expect(changes.find((c) => c.pointer === "/a")).toBeUndefined();
+    expect(changes).toContainEqual({ kind: "type_changed", pointer: "/b", from: "string", to: "integer" });
+  });
+
+  it("through the real normalizer: a 3.0 nullable nested field that only changes elsewhere is not spuriously flagged", async () => {
+    // normalize turns `nullable:true` into `type:["string","null"]`; the nested
+    // `profile.nickname` is unchanged, only `profile.age` changes.
+    const spec = (ageType: string) => ({
+      openapi: "3.0.3",
+      info: { title: "S", version: "1" },
+      paths: { "/u": { post: { operationId: "createU", requestBody: { content: { "application/json": { schema: { type: "object", properties: { profile: { type: "object", properties: { nickname: { type: "string", nullable: true }, age: { type: ageType } } } } } } } }, ...ok } } },
+    });
+    const from: VersionSide = { doc: (await normalize(spec("string"))).doc, operations: [makeOp("POST", "/u", "createU")], typeDefs: [] };
+    const to: VersionSide = { doc: (await normalize(spec("integer"))).doc, operations: [makeOp("POST", "/u", "createU")], typeDefs: [] };
+    const changes = diffOperations(from, to).changed[0]!.changes;
+    expect(changes.find((c) => c.pointer === "/profile/nickname")).toBeUndefined();
+    expect(changes).toContainEqual({ kind: "type_changed", pointer: "/profile/age", from: "string", to: "integer" });
+  });
+
+  it("an unchanged union-typed param is not flagged param_type_changed", () => {
+    const param = (name: string, type: unknown) => ({ name, in: "query", required: false, schema: { type } });
+    const fromSide = side({ "/a": { get: { operationId: "getA", parameters: [param("a", ["string", "null"]), param("b", "string")], ...ok } } });
+    const toSide = side({ "/a": { get: { operationId: "getA", parameters: [param("a", ["string", "null"]), param("b", "integer")], ...ok } } });
+    const changes = diffOperations(fromSide, toSide).changed[0]!.changes;
+    expect(changes.find((c) => c.kind === "param_type_changed" && c.pointer === "/a")).toBeUndefined();
+    expect(changes).toContainEqual({ kind: "param_type_changed", pointer: "/b", from: "string", to: "integer" });
+  });
+});
+
+describe("classifyDiff — ref_changed classification (#6)", () => {
+  it("a ref_changed is breaking (the referenced shape changed identity)", () => {
+    const fromSide = side({ "/a": { post: { operationId: "createA", requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { pet: { $ref: "#/components/schemas/Cat" } } } } } }, ...ok } } });
+    const toSide = side({ "/a": { post: { operationId: "createA", requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { pet: { $ref: "#/components/schemas/Dog" } } } } } }, ...ok } } });
+    const change = classifyDiff(diffOperations(fromSide, toSide)).changed[0]!.changes.find((c) => c.kind === "ref_changed")!;
+    expect(change.classification).toBe("breaking");
+  });
+});
+
+describe("diffOperations — response-body field itemization (#4)", () => {
+  const obj = (properties: Record<string, unknown>, required?: string[]) => ({ type: "object", properties, ...(required ? { required } : {}) });
+  const resp = (schema: unknown) => ({ "200": { description: "OK", content: { "application/json": { schema } } } });
+  const get = (from: unknown, to: unknown) => {
+    const fromSide = side({ "/a": { get: { operationId: "getA", responses: resp(from) } } });
+    const toSide = side({ "/a": { get: { operationId: "getA", responses: resp(to) } } });
+    return diffOperations(fromSide, toSide).changed[0]?.changes ?? [];
+  };
+  const classifyGet = (from: unknown, to: unknown) => {
+    const fromSide = side({ "/a": { get: { operationId: "getA", responses: resp(from) } } });
+    const toSide = side({ "/a": { get: { operationId: "getA", responses: resp(to) } } });
+    return classifyDiff(diffOperations(fromSide, toSide)).changed[0]!.changes;
+  };
+
+  it("a field added to a response body → response_field_added at /<status>/<field>, non_breaking", () => {
+    const changes = classifyGet(obj({ id: { type: "string" } }), obj({ id: { type: "string" }, name: { type: "string" } }));
+    expect(changes).toContainEqual({ kind: "response_field_added", pointer: "/200/name", required: false, classification: "non_breaking" });
+  });
+
+  it("a field removed from a response body → response_field_removed, breaking (a caller relied on it)", () => {
+    const changes = classifyGet(obj({ id: { type: "string" }, name: { type: "string" } }), obj({ id: { type: "string" } }));
+    expect(changes).toContainEqual({ kind: "response_field_removed", pointer: "/200/name", required: false, classification: "breaking" });
+  });
+
+  it("a response field type change → response_field_type_changed, breaking", () => {
+    const changes = classifyGet(obj({ amount: { type: "string" } }), obj({ amount: { type: "integer" } }));
+    expect(changes).toContainEqual({ kind: "response_field_type_changed", pointer: "/200/amount", from: "string", to: "integer", classification: "breaking" });
+  });
+
+  it("response required flips invert the request semantics: added → non_breaking, removed → breaking", () => {
+    const added = classifyGet(obj({ id: { type: "string" } }), obj({ id: { type: "string" } }, ["id"]));
+    expect(added).toContainEqual({ kind: "response_required_added", pointer: "/200/id", classification: "non_breaking" });
+    const removed = classifyGet(obj({ id: { type: "string" } }, ["id"]), obj({ id: { type: "string" } }));
+    expect(removed).toContainEqual({ kind: "response_required_removed", pointer: "/200/id", classification: "breaking" });
+  });
+
+  it("a response field $ref-retarget → response_ref_changed, breaking", () => {
+    const changes = classifyGet(obj({ pet: { $ref: "#/components/schemas/Cat" } }), obj({ pet: { $ref: "#/components/schemas/Dog" } }));
+    expect(changes).toContainEqual({ kind: "response_ref_changed", pointer: "/200/pet", from: "#/components/schemas/Cat", to: "#/components/schemas/Dog", classification: "breaking" });
+  });
+
+  it("a $ref'd response body (whole schema is a $ref) is not itemized (routes to the types dimension)", () => {
+    const changes = get({ $ref: "#/components/schemas/Invoice" }, { $ref: "#/components/schemas/Invoice" });
+    expect(changes.filter((c) => c.pointer.startsWith("/200/"))).toEqual([]);
+  });
+});
+
 describe("diffTypes — types dimension", () => {
   function td(name: string): TypeDef {
-    return { spec_id: "s", version_id: "v", name, kind: "object", pointer: `/components/schemas/${name}` };
+    return { spec_id: "s", version_id: "v", name, kind: "object", pointer: `/components/schemas/${name}`, description: null };
   }
   function typeSide(typeDefs: TypeDef[], schemas: Record<string, unknown> = {}): VersionSide {
     const doc = { openapi: "3.1.0", info: { title: "T", version: "1" }, paths: {}, components: { schemas } } as NormalizedDoc;
@@ -265,10 +436,10 @@ describe("diffTypes — types dimension", () => {
     expect(diffTypes(from, to)).toEqual({ added: [], removed: ["Invoice"], changed: [] });
   });
 
-  it("T3: same-name TypeDef whose component subtree differs → types.changed", () => {
+  it("T3: same-name TypeDef whose component subtree differs → types.changed, itemized", () => {
     const from = typeSide([td("Invoice")], { Invoice: { type: "object", properties: { id: { type: "string" } } } });
     const to = typeSide([td("Invoice")], { Invoice: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } } });
-    expect(diffTypes(from, to)).toEqual({ added: [], removed: [], changed: ["Invoice"] });
+    expect(diffTypes(from, to)).toEqual({ added: [], removed: [], changed: [{ name: "Invoice", changes: [{ kind: "request_field_added", pointer: "/name", required: false }] }] });
   });
 
   it("T4: description-only TypeDef change → NOT changed (structural strip holds)", () => {
@@ -280,7 +451,48 @@ describe("diffTypes — types dimension", () => {
   it("T5: a description-only TypeDef change IS changed when includeDescriptions is set", () => {
     const from = typeSide([td("Invoice")], { Invoice: { type: "object", description: "old" } });
     const to = typeSide([td("Invoice")], { Invoice: { type: "object", description: "new" } });
-    expect(diffTypes(from, to, { includeDescriptions: true })).toEqual({ added: [], removed: [], changed: ["Invoice"] });
+    // Flagged changed, but a description-only delta itemizes to nothing.
+    expect(diffTypes(from, to, { includeDescriptions: true })).toEqual({ added: [], removed: [], changed: [{ name: "Invoice", changes: [] }] });
+  });
+
+  it("T6: a changed type is itemized into field changes via the recursive engine (#7)", () => {
+    const from = typeSide([td("Invoice")], { Invoice: { type: "object", properties: { id: { type: "string" }, amount: { type: "string" } } } });
+    const to = typeSide([td("Invoice")], { Invoice: { type: "object", properties: { id: { type: "string" }, amount: { type: "integer" }, status: { type: "string" } } } });
+    const changed = diffTypes(from, to).changed;
+    expect(changed).toEqual([
+      {
+        name: "Invoice",
+        changes: [
+          { kind: "type_changed", pointer: "/amount", from: "string", to: "integer" },
+          { kind: "request_field_added", pointer: "/status", required: false },
+        ],
+      },
+    ]);
+  });
+});
+
+describe("classifyTypes — type classification + counts (#8)", () => {
+  it("removed→breaking, added→non_breaking, changed-type changes counted by their classification", () => {
+    const typesDiff = {
+      added: ["NewType"],
+      removed: ["OldType"],
+      changed: [
+        {
+          name: "Invoice",
+          changes: [
+            { kind: "type_changed" as const, pointer: "/amount", from: "string", to: "integer" },
+            { kind: "request_field_added" as const, pointer: "/status", required: false },
+          ],
+        },
+      ],
+    };
+    const classified = classifyTypes(typesDiff);
+    // removed OldType (breaking) + amount type_changed (breaking) = 2 breaking;
+    // added NewType (non_breaking) + status added optional (non_breaking) = 2 non_breaking.
+    expect(classified.summary).toEqual({ breaking: 2, non_breaking: 2, unknown: 0 });
+    // Each itemized change carries its classification (consistent with operations).
+    expect(classified.changed[0]!.changes).toContainEqual({ kind: "type_changed", pointer: "/amount", from: "string", to: "integer", classification: "breaking" });
+    expect(classified.changed[0]!.changes).toContainEqual({ kind: "request_field_added", pointer: "/status", required: false, classification: "non_breaking" });
   });
 });
 
@@ -402,6 +614,30 @@ describe("classifyDiff — classification heuristic", () => {
     expect(result.summary.unknown).toBe(0);
   });
 
+  it("Pin B: op-level param overrides path-item required in differ merge", () => {
+    // side() iterates all path-item keys as methods — hand-build for path-item params.
+    const fromDoc = {
+      openapi: "3.1.0", info: { title: "T", version: "1" },
+      paths: {
+        "/a": {
+          parameters: [{ name: "status", in: "query", required: false, schema: { type: "string" } }],
+          get: { operationId: "getA", parameters: [{ name: "status", in: "query", required: true, schema: { type: "integer" } }], responses: { "200": { description: "OK" } } },
+        },
+      },
+    } as NormalizedDoc;
+    const fromSide: VersionSide = { doc: fromDoc, operations: [makeOp("get", "/a", "getA")], typeDefs: [] };
+    const toSide = side({ "/a": { get: { operationId: "getA", ...ok } } });
+    const changes = diffOperations(fromSide, toSide).changed[0]!.changes;
+    expect(changes.find((c) => c.kind === "param_removed")).toMatchObject({ pointer: "/status", required: true });
+  });
+
+  it("Pin C: path param without required key → required forced to true in differ merge", () => {
+    const from = classifySide({ "/a/{id}": { get: { operationId: "getA", parameters: [{ name: "id", in: "path", schema: { type: "string" } }], ...ok } } });
+    const to = classifySide({ "/a/{id}": { get: { operationId: "getA", ...ok } } });
+    const changes = diffOperations(from, to).changed[0]!.changes;
+    expect(changes.find((c) => c.kind === "param_removed")).toMatchObject({ pointer: "/id", required: true });
+  });
+
   it("K12: summary totals aggregate correctly across multiple changes on one op", () => {
     // POST:/a: metadata added (non_breaking) + idempotency_key required added (breaking) + amount type_changed (breaking)
     const fromSide = classifySide({ "/a": { post: { operationId: "createA", requestBody: { content: { "application/json": { schema: { type: "object", properties: { amount: { type: "string" } } } } } }, ...ok } } });
@@ -412,6 +648,142 @@ describe("classifyDiff — classification heuristic", () => {
     expect(result.summary.breaking).toBe(2);
     expect(result.summary.non_breaking).toBe(1);
     expect(result.summary.unknown).toBe(0);
+  });
+});
+
+describe("T10 characterization — diff classification baseline before itemization carries", () => {
+  it("Char-1 (updated by carry #1): optional request_field_removed when TO-schema has additionalProperties:false → breaking", () => {
+    // When the TO-schema is closed (additionalProperties:false), a caller still sending
+    // the removed optional field will be rejected by the new spec — breaking.
+    // The OperationChange carries closedSchema:true so classifyChange can see it.
+    const from = classifySide({ "/a": { post: { operationId: "createA",
+      requestBody: { content: { "application/json": { schema: {
+        type: "object", properties: { amount: { type: "string" }, metadata: { type: "object" } },
+      } } } }, ...ok } } });
+    const to = classifySide({ "/a": { post: { operationId: "createA",
+      requestBody: { content: { "application/json": { schema: {
+        type: "object", properties: { amount: { type: "string" } }, additionalProperties: false,
+      } } } }, ...ok } } });
+    const classified = classifyDiff(diffOperations(from, to));
+    const change = classified.changed[0]!.changes.find((c) => c.kind === "request_field_removed" && c.pointer === "/metadata")!;
+    expect(change).toBeDefined();
+    expect(change.classification).toBe("breaking");
+    expect((change as any).closedSchema).toBe(true); // context threaded from diffSchema
+  });
+
+  it("Char-1b: optional removal from open TO schema (no additionalProperties:false) → still non_breaking", () => {
+    // Invariant: the baseline non_breaking case must not change after carry #1.
+    const from = classifySide({ "/a": { post: { operationId: "createA",
+      requestBody: { content: { "application/json": { schema: {
+        type: "object", properties: { amount: { type: "string" }, metadata: { type: "object" } },
+      } } } }, ...ok } } });
+    const to = classifySide({ "/a": { post: { operationId: "createA",
+      requestBody: { content: { "application/json": { schema: {
+        type: "object", properties: { amount: { type: "string" } },
+        // NO additionalProperties:false — open schema
+      } } } }, ...ok } } });
+    const change = classifyDiff(diffOperations(from, to)).changed[0]!.changes
+      .find((c) => c.kind === "request_field_removed" && c.pointer === "/metadata")!;
+    expect(change).toBeDefined();
+    expect(change.classification).toBe("non_breaking");
+    expect((change as any).closedSchema).toBeUndefined();
+  });
+
+  it("Char-3a (updated by carry #3): shared param type change → param_type_changed, breaking", () => {
+    const from = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "limit", in: "query", schema: { type: "string" } }], ...ok } },
+    });
+    const to = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "limit", in: "query", schema: { type: "integer" } }], ...ok } },
+    });
+    const classified = classifyDiff(diffOperations(from, to));
+    const change = classified.changed.find((c) => c.operation_key === "GET:/a")!
+      .changes.find((c) => c.kind === "param_type_changed")!;
+    expect(change).toBeDefined();
+    expect(change.pointer).toBe("/limit");
+    expect(change.from).toBe("string");
+    expect(change.to).toBe("integer");
+    expect(change.classification).toBe("breaking");
+  });
+
+  it("Char-3b (updated by carry #3): shared param optional→required flip → param_required_added, breaking", () => {
+    const from = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "q", in: "query", required: false, schema: { type: "string" } }], ...ok } },
+    });
+    const to = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }], ...ok } },
+    });
+    const classified = classifyDiff(diffOperations(from, to));
+    const change = classified.changed.find((c) => c.operation_key === "GET:/a")!
+      .changes.find((c) => c.kind === "param_required_added")!;
+    expect(change).toBeDefined();
+    expect(change.pointer).toBe("/q");
+    expect(change.classification).toBe("breaking");
+  });
+
+  it("Char-3c: shared param required→optional flip → param_required_removed, non_breaking", () => {
+    const from = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }], ...ok } },
+    });
+    const to = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "q", in: "query", required: false, schema: { type: "string" } }], ...ok } },
+    });
+    const classified = classifyDiff(diffOperations(from, to));
+    const change = classified.changed.find((c) => c.operation_key === "GET:/a")!
+      .changes.find((c) => c.kind === "param_required_removed")!;
+    expect(change).toBeDefined();
+    expect(change.pointer).toBe("/q");
+    expect(change.classification).toBe("non_breaking");
+  });
+
+  it("Char-3d: shared param with NO type change → no param_type_changed (no spurious detection)", () => {
+    const from = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "limit", in: "query", schema: { type: "integer" } }], ...ok } },
+    });
+    const to = classifySide({
+      "/a": { get: { operationId: "getA",
+        parameters: [{ name: "limit", in: "query", schema: { type: "integer" } }], ...ok } },
+    });
+    const diff = diffOperations(from, to);
+    expect(diff.changed).toEqual([]); // identical → not in changed
+  });
+
+  it("Char-5 (updated by carry #5): deprecated false→true → operation_deprecated, non_breaking", () => {
+    const from = classifySide({ "/a": { get: { operationId: "getA", deprecated: false, ...ok } } });
+    const to = classifySide({ "/a": { get: { operationId: "getA", deprecated: true, ...ok } } });
+    const classified = classifyDiff(diffOperations(from, to));
+    const change = classified.changed.find((c) => c.operation_key === "GET:/a")!
+      .changes.find((c) => c.kind === "operation_deprecated")!;
+    expect(change).toBeDefined();
+    expect(change.pointer).toBe("/deprecated");
+    expect(change.from).toBe(false);
+    expect(change.to).toBe(true);
+    expect(change.classification).toBe("non_breaking");
+  });
+
+  it("Char-5b: deprecated true→false (un-deprecate) → operation_deprecated, non_breaking", () => {
+    const from = classifySide({ "/a": { get: { operationId: "getA", deprecated: true, ...ok } } });
+    const to = classifySide({ "/a": { get: { operationId: "getA", deprecated: false, ...ok } } });
+    const classified = classifyDiff(diffOperations(from, to));
+    const change = classified.changed.find((c) => c.operation_key === "GET:/a")!
+      .changes.find((c) => c.kind === "operation_deprecated")!;
+    expect(change).toBeDefined();
+    expect(change.from).toBe(true);
+    expect(change.to).toBe(false);
+    expect(change.classification).toBe("non_breaking");
+  });
+
+  it("Char-5c: deprecated flag unchanged (false→false) → op NOT in changed", () => {
+    const from = classifySide({ "/a": { get: { operationId: "getA", deprecated: false, ...ok } } });
+    const to = classifySide({ "/a": { get: { operationId: "getA", deprecated: false, ...ok } } });
+    expect(diffOperations(from, to).changed).toEqual([]);
   });
 });
 

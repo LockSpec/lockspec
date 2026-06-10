@@ -55,7 +55,61 @@ describe("differ fixture integration — billing-v1 → billing-v2", () => {
 
     expect(types.added).toEqual([]);
     expect(types.removed).toEqual([]);
-    expect(types.changed).toContain("Invoice");
+    expect(types.changed).toEqual([
+      {
+        name: "Invoice",
+        changes: [
+          { kind: "type_changed", pointer: "/amount", from: "string", to: "integer" },
+          { kind: "request_field_added", pointer: "/status", required: false },
+        ],
+      },
+    ]);
+  });
+
+  // Exact-snapshot baseline (vs the loose toContainEqual assertions above): pins
+  // the COMPLETE current itemization so an additive carry that perturbs an existing
+  // surface is caught, not just a missing entry. billing's request bodies are flat
+  // and its response schemas are all $ref, so the recursive-schema and response-body
+  // carries add nothing here; the per-type carry flips `types.changed`.
+  it("characterization: complete classified ops diff + types diff (current behavior)", async () => {
+    const from = await loadSide("billing-v1.yaml");
+    const to = await loadSide("billing-v2.yaml");
+    const classified = classifyDiff(diffOperations(from, to));
+
+    expect(classified.added).toEqual([
+      { operation_key: "GET:/v1/invoices/{id}", method: "GET", path: "/v1/invoices/{id}", operation_id: "getInvoice" },
+    ]);
+    expect(classified.removed).toEqual([
+      { operation_key: "DELETE:/v1/invoices/{id}", method: "DELETE", path: "/v1/invoices/{id}", operation_id: "deleteInvoice" },
+    ]);
+    expect(classified.changed).toEqual([
+      {
+        operation_key: "POST:/v1/invoices",
+        method: "POST",
+        path: "/v1/invoices",
+        operation_id: "createInvoice",
+        changes: [
+          { kind: "type_changed", pointer: "/amount", from: "string", to: "integer", classification: "breaking" },
+          { kind: "request_field_added", pointer: "/idempotency_key", required: true, classification: "breaking" },
+          { kind: "request_field_added", pointer: "/metadata", required: false, classification: "non_breaking" },
+        ],
+      },
+    ]);
+    expect(classified.summary).toEqual({ breaking: 3, non_breaking: 2, unknown: 0 });
+
+    expect(diffTypes(from, to)).toEqual({
+      added: [],
+      removed: [],
+      changed: [
+        {
+          name: "Invoice",
+          changes: [
+            { kind: "type_changed", pointer: "/amount", from: "string", to: "integer" },
+            { kind: "request_field_added", pointer: "/status", required: false },
+          ],
+        },
+      ],
+    });
   });
 
   it("classified diff: correct summary for billing-v1 → billing-v2", async () => {

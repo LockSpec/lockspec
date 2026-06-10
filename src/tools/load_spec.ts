@@ -154,8 +154,8 @@ async function handle(args: unknown, deps: ToolDeps) {
       // Reload backfill: a version persisted before the indexer was implemented
       // would have an empty index. Reindex in place without creating a new version.
       const stale =
-        store.getOperations(spec_id, version_id).length === 0 &&
-        store.getTypeDefs(spec_id, version_id).length === 0;
+        store.countOperations(spec_id, version_id) === 0 &&
+        store.countTypeDefs(spec_id, version_id) === 0;
       if (stale) {
         const { operations, typeDefs } = indexDoc(doc, { spec_id, version_id, specFormat });
         if (operations.length || typeDefs.length) {
@@ -164,8 +164,8 @@ async function handle(args: unknown, deps: ToolDeps) {
       }
       version = existing;
       wasExisting = true;
-      opCount = store.getOperations(spec_id, version_id).length;
-      tdCount = store.getTypeDefs(spec_id, version_id).length;
+      opCount = store.countOperations(spec_id, version_id);
+      tdCount = store.countTypeDefs(spec_id, version_id);
     } else {
       // Derived-slug collision: the slug matches an existing spec established by
       // a DIFFERENT info.title — a genuine identity clash, not a new version.

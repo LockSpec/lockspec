@@ -101,6 +101,9 @@ export interface TypeDef {
   kind: string;
   /** JSON-Pointer into the normalized JSON snapshot. */
   pointer: string;
+  /** The schema's `description`, when a string; null otherwise. Indexed so
+   *  find_type can match on it, not just the name. */
+  description: string | null;
 }
 
 /**
@@ -168,6 +171,12 @@ export interface Store {
 
   getOperations(spec_id: string, version_id: string): Operation[];
   getTypeDefs(spec_id: string, version_id: string): TypeDef[];
+  /** Row count without materializing index rows. Returns 0 for unknown spec/version. */
+  countOperations(spec_id: string, version_id: string): number;
+  /** Row count without materializing index rows. Returns 0 for unknown spec/version. */
+  countTypeDefs(spec_id: string, version_id: string): number;
+  /** True if a snapshot file exists for the given content_hash. */
+  hasSnapshot(content_hash: string): boolean;
 
   /**
    * Raw lexical-search primitive over the operations index, scoped to one version.

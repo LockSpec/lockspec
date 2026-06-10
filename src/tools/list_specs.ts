@@ -15,8 +15,8 @@ function specView(store: Store, spec: Spec) {
     active: v.version_id === active,
     provenance: v.provenance,
     stats: {
-      operations: store.getOperations(spec.spec_id, v.version_id).length,
-      type_defs: store.getTypeDefs(spec.spec_id, v.version_id).length,
+      operations: store.countOperations(spec.spec_id, v.version_id),
+      type_defs: store.countTypeDefs(spec.spec_id, v.version_id),
     },
   }));
   return { spec_id: spec.spec_id, label: spec.label, active_version_id: active, versions };

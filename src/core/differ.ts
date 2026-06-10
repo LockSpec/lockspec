@@ -4,13 +4,12 @@ import {
   resolvePointer,
   isObj,
   asObj,
-  asArray,
   refTarget,
   deref,
   stripSuffix,
-  parentPointer,
   type Obj,
 } from "./json-pointer.js";
+import { mergeParameters } from "./params.js";
 
 export interface OperationRef {
   operation_key: string;
@@ -21,10 +20,16 @@ export interface OperationRef {
 
 export type ChangeKind =
   | "param_added" | "param_removed"
+  | "param_type_changed" | "param_required_added" | "param_required_removed"
   | "request_field_added" | "request_field_removed"
   | "required_added" | "required_removed"
   | "type_changed"
-  | "response_added" | "response_removed";
+  | "ref_changed"
+  | "response_added" | "response_removed"
+  | "response_field_added" | "response_field_removed"
+  | "response_field_type_changed" | "response_ref_changed"
+  | "response_required_added" | "response_required_removed"
+  | "operation_deprecated";
 
 // Conservative three-value classification. `unknown` is the forward-compat
 // default for unrecognized kinds.
@@ -41,9 +46,14 @@ export interface OperationChange {
   /** Whether the affected field/parameter is required. Set only for the field- and
    *  param-add/remove kinds; always true for a path parameter. */
   required?: boolean;
-  /** The `type` keyword before and after the change — set only for `type_changed`. */
+  /** The `type` keyword before and after the change — set only for `type_changed`
+   *  and `param_type_changed`. */
   from?: unknown;
   to?: unknown;
+  /** True when the TO request-body schema declares `additionalProperties: false` and
+   *  the removed field (`request_field_removed`) was optional — the field will now be
+   *  *rejected* by the new spec even though it was only optional before. */
+  closedSchema?: boolean;
   /** breaking / non_breaking verdict, added by `classifyDiff`; absent on the raw
    *  `diffOperations` output, present once classified. */
   classification?: Classification;
@@ -59,8 +69,9 @@ export interface OperationsDiff {
   changed: ChangedOperation[];
 }
 
-/** Classification summary. Types dimension not counted (deferred with per-type
- *  field itemization). `unknown` is non-zero only for unrecognized future kinds. */
+/** Classification summary. Operation and type changes both count (the tool folds
+ *  the types dimension in for scope:'all' via classifyTypes). `unknown` is non-zero
+ *  only for unrecognized future kinds. */
 export interface DiffSummary {
   breaking: number;
   non_breaking: number;
@@ -80,11 +91,18 @@ export interface DiffOptions {
   includeDescriptions?: boolean;
 }
 
-/** Added/removed/changed TypeDef names (flag-only). */
+/** One changed TypeDef, itemized into field changes by the recursive schema engine
+ *  (request kind-set — a component schema has no intrinsic direction). */
+export interface ChangedType {
+  name: string;
+  changes: OperationChange[];
+}
+
+/** Added/removed TypeDef names + per-changed-type itemized field changes. */
 export interface TypesDiff {
   added: string[];
   removed: string[];
-  changed: string[];
+  changed: ChangedType[];
 }
 
 export interface VersionSide {
@@ -138,25 +156,6 @@ function sortChanges(changes: OperationChange[]): OperationChange[] {
   );
 }
 
-/** Merge path-item + op-level params keyed by `{in} {name}` (op-level wins),
- *  matching the OpenAPI Path Item Object rule. */
-function mergeParams(doc: NormalizedDoc, op: Operation): Map<string, { name: string; in: string; required: boolean }> {
-  const binding = op.openapi!;
-  const opBase = stripSuffix(binding.pointers.params, "/parameters");
-  const raw = [
-    ...asArray(resolvePointer(doc, `${parentPointer(opBase)}/parameters`)),
-    ...asArray(resolvePointer(doc, binding.pointers.params)),
-  ];
-  const byKey = new Map<string, { name: string; in: string; required: boolean }>();
-  for (const entry of raw) {
-    const p = asObj(deref(doc, entry));
-    if (!p || typeof p.name !== "string" || typeof p.in !== "string") continue;
-    // Path params are always required per OpenAPI spec.
-    const required = p.required === true || p.in === "path";
-    byKey.set(`${p.in as string} ${p.name as string}`, { name: p.name as string, in: p.in as string, required });
-  }
-  return byKey;
-}
 
 /** Return the INLINE request-body schema (not a $ref) for the primary content type,
  *  or null if absent/$ref'd ($ref'd bodies surface in diffTypes instead). */
@@ -180,9 +179,58 @@ function getResponseStatuses(doc: NormalizedDoc, op: Operation): Set<string> {
   return new Set(isObj(responses) ? Object.keys(responses) : []);
 }
 
-/** Diff two inline object schemas at ONE level: added/removed properties,
- *  required-membership changes, and type-keyword changes on shared properties. */
-function diffSchema(from: unknown, to: unknown): OperationChange[] {
+// Value (not reference) inequality of two `type` keywords. A union type is an array
+// (`["string","null"]`), distinct objects across the two docs — a `!==` compare would
+// flag an unchanged union as changed; compare canonical form instead.
+const typeChanged = (from: unknown, to: unknown): boolean => canonicalize(from) !== canonicalize(to);
+
+// Bound on nested-property recursion. Mirrors buildSignature's depth cap. No cycle
+// guard is needed: diffSchema never follows a $ref (a $ref-retarget is a string
+// compare), so a property cycle cannot be entered.
+const DIFF_MAX_DEPTH = 6;
+
+// The per-direction kind-set diffSchema emits. Request and response field changes
+// classify oppositely (a caller depends on the response), so each direction maps the
+// same structural deltas to its own kinds — the inversion lives in classifyChange.
+interface SchemaKinds {
+  added: ChangeKind;
+  removed: ChangeKind;
+  typeChanged: ChangeKind;
+  refChanged: ChangeKind;
+  requiredAdded: ChangeKind;
+  requiredRemoved: ChangeKind;
+  /** Set `closedSchema:true` on an optional removal into a closed TO-schema — a
+   *  request-only concern (the caller's now-rejected field); responses ignore it. */
+  closedFlag: boolean;
+}
+
+const REQUEST_KINDS: SchemaKinds = {
+  added: "request_field_added",
+  removed: "request_field_removed",
+  typeChanged: "type_changed",
+  refChanged: "ref_changed",
+  requiredAdded: "required_added",
+  requiredRemoved: "required_removed",
+  closedFlag: true,
+};
+
+const RESPONSE_KINDS: SchemaKinds = {
+  added: "response_field_added",
+  removed: "response_field_removed",
+  typeChanged: "response_field_type_changed",
+  refChanged: "response_ref_changed",
+  requiredAdded: "response_required_added",
+  requiredRemoved: "response_required_removed",
+  closedFlag: false,
+};
+
+/** Recursively diff two INLINE object schemas: added/removed properties,
+ *  required-membership changes, type-keyword changes, and `$ref`-retarget on shared
+ *  properties — descending into nested inline objects (deep JSON Pointer). A `$ref`
+ *  is never followed: same target → no change (the type dimension owns it); changed
+ *  target or ref↔inline reshape → the kind-set's `refChanged`. `kinds` selects the
+ *  request- or response-direction kinds; `prefix` carries the parent pointer. */
+function diffSchema(from: unknown, to: unknown, kinds: SchemaKinds, depth = 0, prefix = ""): OperationChange[] {
   const fromObj = asObj(from) ?? {};
   const toObj = asObj(to) ?? {};
   const fromProps = asObj(fromObj.properties) ?? {};
@@ -194,45 +242,109 @@ function diffSchema(from: unknown, to: unknown): OperationChange[] {
 
   for (const name of Object.keys(toProps)) {
     if (!(name in fromProps)) {
-      changes.push({ kind: "request_field_added", pointer: `/${name}`, required: toReq.has(name) });
+      changes.push({ kind: kinds.added, pointer: `${prefix}/${name}`, required: toReq.has(name) });
     }
   }
+  // When the TO-schema is closed (additionalProperties:false), an existing caller
+  // still sending the removed optional field will be rejected by the new spec.
+  const toIsClosed = toObj.additionalProperties === false;
   for (const name of Object.keys(fromProps)) {
     if (!(name in toProps)) {
-      changes.push({ kind: "request_field_removed", pointer: `/${name}`, required: fromReq.has(name) });
+      const required = fromReq.has(name);
+      changes.push({
+        kind: kinds.removed,
+        pointer: `${prefix}/${name}`,
+        required,
+        ...(kinds.closedFlag && toIsClosed && !required ? { closedSchema: true } : {}),
+      });
     }
   }
   for (const name of Object.keys(fromProps)) {
     if (!(name in toProps)) continue;
-    const ptr = `/${name}`;
-    if (!fromReq.has(name) && toReq.has(name)) changes.push({ kind: "required_added", pointer: ptr });
-    if (fromReq.has(name) && !toReq.has(name)) changes.push({ kind: "required_removed", pointer: ptr });
-    const fromType = asObj(fromProps[name])?.type;
-    const toType = asObj(toProps[name])?.type;
-    if (fromType !== undefined && toType !== undefined && fromType !== toType) {
-      changes.push({ kind: "type_changed", pointer: ptr, from: fromType, to: toType });
+    const ptr = `${prefix}/${name}`;
+    if (!fromReq.has(name) && toReq.has(name)) changes.push({ kind: kinds.requiredAdded, pointer: ptr });
+    if (fromReq.has(name) && !toReq.has(name)) changes.push({ kind: kinds.requiredRemoved, pointer: ptr });
+
+    const fromProp = fromProps[name];
+    const toProp = toProps[name];
+    const fromRef = refTarget(fromProp);
+    const toRef = refTarget(toProp);
+    if (fromRef !== toRef && (fromRef !== undefined || toRef !== undefined)) {
+      // Retarget (#/A → #/B) or a ref↔inline reshape; the inline side reports null.
+      changes.push({ kind: kinds.refChanged, pointer: ptr, from: fromRef ?? null, to: toRef ?? null });
+      continue;
+    }
+    if (fromRef !== undefined) continue; // identical $ref both sides — type dimension owns any change
+
+    const fromType = asObj(fromProp)?.type;
+    const toType = asObj(toProp)?.type;
+    if (fromType !== undefined && toType !== undefined && typeChanged(fromType, toType)) {
+      changes.push({ kind: kinds.typeChanged, pointer: ptr, from: fromType, to: toType });
+      continue; // shape diverged — don't descend into a now-mismatched node
+    }
+    if (depth < DIFF_MAX_DEPTH && isObj(asObj(fromProp)?.properties) && isObj(asObj(toProp)?.properties)) {
+      changes.push(...diffSchema(fromProp, toProp, kinds, depth + 1, ptr));
     }
   }
 
   return changes;
 }
 
+/** The INLINE response schema for a status's primary content type, or null if
+ *  absent/$ref'd ($ref'd response bodies route to diffTypes — same seam as request
+ *  bodies in getInlineBodySchema). */
+function getInlineResponseSchema(doc: NormalizedDoc, op: Operation, status: string): unknown | null {
+  const responses = asObj(resolvePointer(doc, op.openapi!.pointers.responses));
+  if (!responses) return null;
+  const resp = asObj(deref(doc, responses[status]));
+  if (!resp) return null;
+  const content = asObj(resp.content);
+  if (!content) return null;
+  const ct = "application/json" in content ? "application/json" : (Object.keys(content)[0] ?? "");
+  if (!ct) return null;
+  const media = asObj(content[ct]);
+  if (!media) return null;
+  const schema = media.schema;
+  if (refTarget(schema) !== undefined) return null;
+  return schema ?? null;
+}
+
 function itemizeChangedOp(fromSide: VersionSide, toSide: VersionSide, fromOp: Operation, toOp: Operation): OperationChange[] {
   const changes: OperationChange[] = [];
 
-  const fromParams = mergeParams(fromSide.doc, fromOp);
-  const toParams = mergeParams(toSide.doc, toOp);
+  // Deprecated flag toggle — structural but not stripped, so the op hash already
+  // differs when we reach here. Pointer /deprecated is unambiguous and carries from/to.
+  const fromOpObj = asObj(opSubtree(fromSide, fromOp));
+  const toOpObj = asObj(opSubtree(toSide, toOp));
+  if (fromOpObj && toOpObj && fromOpObj.deprecated !== toOpObj.deprecated) {
+    changes.push({ kind: "operation_deprecated", pointer: "/deprecated", from: fromOpObj.deprecated, to: toOpObj.deprecated });
+  }
+
+  const fromParams = mergeParameters(fromSide.doc, fromOp);
+  const toParams = mergeParameters(toSide.doc, toOp);
   for (const [key, p] of toParams) {
     if (!fromParams.has(key)) changes.push({ kind: "param_added", pointer: `/${p.name}`, required: p.required });
   }
   for (const [key, p] of fromParams) {
     if (!toParams.has(key)) changes.push({ kind: "param_removed", pointer: `/${p.name}`, required: p.required });
   }
+  // Shared params: detect type change and required flip.
+  for (const [key, fp] of fromParams) {
+    const tp = toParams.get(key);
+    if (tp === undefined) continue;
+    if (!fp.required && tp.required) changes.push({ kind: "param_required_added", pointer: `/${fp.name}` });
+    if (fp.required && !tp.required) changes.push({ kind: "param_required_removed", pointer: `/${fp.name}` });
+    const fromType = asObj(fp.param.schema)?.type;
+    const toType = asObj(tp.param.schema)?.type;
+    if (fromType !== undefined && toType !== undefined && typeChanged(fromType, toType)) {
+      changes.push({ kind: "param_type_changed", pointer: `/${fp.name}`, from: fromType, to: toType });
+    }
+  }
 
   const fromBodySchema = getInlineBodySchema(fromSide.doc, fromOp);
   const toBodySchema = getInlineBodySchema(toSide.doc, toOp);
   if (fromBodySchema !== null && toBodySchema !== null) {
-    changes.push(...diffSchema(fromBodySchema, toBodySchema));
+    changes.push(...diffSchema(fromBodySchema, toBodySchema, REQUEST_KINDS));
   }
 
   const fromStatuses = getResponseStatuses(fromSide.doc, fromOp);
@@ -242,6 +354,16 @@ function itemizeChangedOp(fromSide: VersionSide, toSide: VersionSide, fromOp: Op
   }
   for (const status of fromStatuses) {
     if (!toStatuses.has(status)) changes.push({ kind: "response_removed", pointer: `/${status}` });
+  }
+  // Shared statuses: itemize the inline response body. Response fields classify
+  // oppositely to request fields (RESPONSE_KINDS), pointer-prefixed by status.
+  for (const status of fromStatuses) {
+    if (!toStatuses.has(status)) continue;
+    const fromResp = getInlineResponseSchema(fromSide.doc, fromOp, status);
+    const toResp = getInlineResponseSchema(toSide.doc, toOp, status);
+    if (fromResp !== null && toResp !== null) {
+      changes.push(...diffSchema(fromResp, toResp, RESPONSE_KINDS, 0, `/${status}`));
+    }
   }
 
   return sortChanges(changes);
@@ -284,14 +406,17 @@ export function diffTypes(from: VersionSide, to: VersionSide, opts?: DiffOptions
   for (const [name] of fromByName) if (!toByName.has(name)) removed.push(name);
 
   const strip = opts?.includeDescriptions ? (x: unknown): unknown => x : stripNonStructural;
-  const changed: string[] = [];
+  const changed: ChangedType[] = [];
   for (const [name, fromTD] of fromByName) {
     const toTD = toByName.get(name);
     if (toTD === undefined) continue;
     const fromSubtree = resolvePointer(from.doc, fromTD.pointer);
     const toSubtree = resolvePointer(to.doc, toTD.pointer);
     if (canonicalize(strip(fromSubtree)) !== canonicalize(strip(toSubtree))) {
-      changed.push(name);
+      // A component schema has no request/response direction; itemize with the
+      // request kind-set. A non-itemizable delta (e.g. enum/description-only) keeps
+      // the type in `changed` with `changes:[]` — never silently dropped.
+      changed.push({ name, changes: sortChanges(diffSchema(fromSubtree, toSubtree, REQUEST_KINDS)) });
     }
   }
 
@@ -305,11 +430,20 @@ function classifyChange(c: OperationChange): Classification {
     case "param_removed":
       // A removed param can't break an existing caller (they were sending it; server ignores).
       return "non_breaking";
+    case "param_type_changed":
+      return "breaking";
+    case "param_required_added":
+      return "breaking";
+    case "param_required_removed":
+      return "non_breaking";
+    case "operation_deprecated":
+      return "non_breaking";
     case "request_field_added":
       return c.required ? "breaking" : "non_breaking";
     case "request_field_removed":
-      // additionalProperties:false edge: optional-removal can still break — a documented carry.
-      return c.required ? "breaking" : "non_breaking";
+      // An optional removal is also breaking when the TO-schema is closed
+      // (additionalProperties:false) — a caller sending the removed field is rejected.
+      return c.required || c.closedSchema ? "breaking" : "non_breaking";
     case "required_added":
       return "breaking";
     case "required_removed":
@@ -317,14 +451,65 @@ function classifyChange(c: OperationChange): Classification {
     case "type_changed":
       // Conservative: any type change may narrow the accepted values.
       return "breaking";
+    case "ref_changed":
+      // The referenced shape changed identity (retarget) or a ref↔inline reshape.
+      return "breaking";
     case "response_added":
       return "non_breaking";
     case "response_removed":
       // Conservative: documented response removed may indicate behavior change.
       return "breaking";
+    // Response fields invert request semantics: a caller depends on the response, so
+    // a field/required-ness the server REMOVES breaks them, one it ADDS does not.
+    case "response_field_added":
+      return "non_breaking";
+    case "response_field_removed":
+      return "breaking";
+    case "response_field_type_changed":
+      return "breaking";
+    case "response_ref_changed":
+      return "breaking";
+    case "response_required_added":
+      return "non_breaking";
+    case "response_required_removed":
+      return "breaking";
     default:
       return "unknown";
   }
+}
+
+/** A changed type with `classification` stamped on each itemized change. */
+export interface ClassifiedChangedType {
+  name: string;
+  changes: OperationChange[];
+}
+
+export interface ClassifiedTypesDiff {
+  added: string[];
+  removed: string[];
+  changed: ClassifiedChangedType[];
+  summary: DiffSummary;
+}
+
+/** Classify the types dimension: removed types → breaking, added types →
+ *  non_breaking, and each changed-type's itemized changes by their per-change
+ *  classification. Stamps `classification` on every change (consistent with
+ *  classifyDiff) and returns the aggregate summary. */
+export function classifyTypes(diff: TypesDiff): ClassifiedTypesDiff {
+  const summary: DiffSummary = { breaking: 0, non_breaking: 0, unknown: 0 };
+  summary.breaking += diff.removed.length;
+  summary.non_breaking += diff.added.length;
+
+  const changed: ClassifiedChangedType[] = diff.changed.map((t) => ({
+    name: t.name,
+    changes: t.changes.map((c) => {
+      const classification = classifyChange(c);
+      summary[classification]++;
+      return { ...c, classification };
+    }),
+  }));
+
+  return { added: diff.added, removed: diff.removed, changed, summary };
 }
 
 /** Stamp `classification` on every OperationChange and compute summary counts.

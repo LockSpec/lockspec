@@ -114,16 +114,21 @@ export function searchTypes(
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const typeDefs = store.getTypeDefs(target.spec_id, target.version_id);
 
+  // Name is the strong tier (exact/prefix). The description matches token-level in
+  // the fuzzy tier: a whole-string trigram-Dice against a multi-sentence
+  // description sits below the threshold, so individual words must be the units —
+  // and a name hit still outranks any description-only hit. No FTS for types.
   const { ranked, truncated } = rankItems(typeDefs, opts.query, (td) => ({
     exact: [td.name],
     prefix: [td.name],
-    fuzzy: [td.name],
+    fuzzy: [td.name, ...tokenize(td.description)],
     tiebreak: td.name,
   }), limit);
 
   const results = ranked.map(({ item: td, score }) => ({
     name: td.name,
     kind: td.kind,
+    description: td.description,
     score,
   }));
   return { results, truncated };
@@ -131,6 +136,12 @@ export function searchTypes(
 
 function str(...xs: (string | null | undefined)[]): string[] {
   return xs.filter((x): x is string => typeof x === "string");
+}
+
+// Word tokens for description matching: alphanumeric runs, so a query term lands a
+// dice=1 hit against the word it equals rather than drowning in the full string.
+function tokenize(s: string | null): string[] {
+  return s ? (s.match(/[a-z0-9]+/gi) ?? []) : [];
 }
 
 function bestDice(qLower: string, fields: string[]): number {
@@ -189,6 +200,7 @@ export interface FindTypeOptions {
 export interface TypeResultRow {
   name: string;
   kind: string;
+  description: string | null;
   score: number;
 }
 

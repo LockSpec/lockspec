@@ -46,7 +46,7 @@ function handle(args: unknown, deps: ToolDeps) {
     scope = "spec";
   }
 
-  const snapshots_deleted = candidateHashes.filter((h) => store.loadSnapshot(h) === undefined);
+  const snapshots_deleted = candidateHashes.filter((h) => !store.hasSnapshot(h));
   const remaining_versions = store.listVersions(spec_id).map((v) => v.version_id);
   const payload = {
     ok: true as const,

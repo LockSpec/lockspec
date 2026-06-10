@@ -93,7 +93,7 @@ describe("indexDoc — typedefs from components/schemas", () => {
   it("extracts one TypeDef per named schema with a JSON-Pointer", async () => {
     const { typeDefs } = await indexFixture("clean/petstore-3.0.yaml");
     expect(typeDefs).toEqual([
-      { spec_id: "petstore", version_id: "v1", name: "Pet", kind: "object", pointer: "/components/schemas/Pet" },
+      { spec_id: "petstore", version_id: "v1", name: "Pet", kind: "object", pointer: "/components/schemas/Pet", description: null },
     ]);
   });
 });
@@ -124,6 +124,29 @@ describe("indexDoc — kind derivation (free-form, display-only)", () => {
     expect(kindOf("Name")).toBe("string");
     expect(kindOf("Nullable")).toBe("string"); // first non-null member of the type array
     expect(kindOf("Bag")).toBe("object"); // no type keyword → object fallback
+  });
+});
+
+describe("indexDoc — typedef description (for find_type matching)", () => {
+  const withSchemas = (body: string) =>
+    `openapi: 3.1.0\ninfo: { title: T, version: '1' }\npaths: {}\ncomponents:\n  schemas:\n${body}`;
+
+  it("captures the schema's description when present; null when absent or non-string", async () => {
+    const { typeDefs } = await indexInline(
+      withSchemas(
+        [
+          "    Invoice:",
+          "      type: object",
+          "      description: A billing invoice record.",
+          "    Plain:",
+          "      type: object",
+          "",
+        ].join("\n"),
+      ),
+    );
+    const descOf = (name: string) => typeDefs.find((t) => t.name === name)!.description;
+    expect(descOf("Invoice")).toBe("A billing invoice record.");
+    expect(descOf("Plain")).toBeNull();
   });
 });
 

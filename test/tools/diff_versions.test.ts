@@ -109,12 +109,15 @@ describe("diff_versions", () => {
     expect(createChange.changes.find((ch: any) => ch.pointer === "/idempotency_key")).toMatchObject({ classification: "breaking" });
     expect(createChange.changes.find((ch: any) => ch.kind === "type_changed" && ch.pointer === "/amount")).toMatchObject({ classification: "breaking" });
 
-    // Types: Invoice changed
-    expect(result.types.changed).toContain("Invoice");
+    // Types: Invoice changed, itemized + classified
+    expect(result.types.changed.map((c: any) => c.name)).toContain("Invoice");
+    const invoiceChange = result.types.changed.find((c: any) => c.name === "Invoice");
+    expect(invoiceChange.changes).toContainEqual({ kind: "type_changed", pointer: "/amount", from: "string", to: "integer", classification: "breaking" });
 
-    // Summary: 1 removed + 1 idempotency_key + 1 type_changed = 3 breaking;
-    //          1 added + 1 metadata = 2 non_breaking
-    expect(result.summary).toEqual({ breaking: 3, non_breaking: 2, unknown: 0 });
+    // Summary (scope:'all') folds in the types dimension:
+    //   ops: 1 removed + idempotency_key + amount type = 3 breaking; 1 added + metadata = 2 non_breaking
+    //   types: Invoice amount type_changed = +1 breaking; status added = +1 non_breaking
+    expect(result.summary).toEqual({ breaking: 4, non_breaking: 3, unknown: 0 });
   });
 
   it("W5: scope:'operations' → has operations+summary; no types key", async () => {
@@ -199,6 +202,34 @@ describe("diff_versions", () => {
     })) as any;
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe("io_error");
+  });
+
+  it("W11: same-hash fast-path with scope:'operations' → no types key (matches slow-path shape)", async () => {
+    const store = new InMemoryStore();
+    const loaded = payloadOf(await loadFile(store, BILLING_V1)) as { spec_id: string; version_id: string };
+    const result = payloadOf(await dv(store, {
+      from: { spec_id: loaded.spec_id, version: loaded.version_id },
+      to: { spec_id: loaded.spec_id, version: loaded.version_id },
+      scope: "operations",
+    })) as any;
+    expect(result.ok).toBe(true);
+    expect(result.operations).toBeDefined();
+    expect(result.summary).toBeDefined();
+    expect(result.types).toBeUndefined();
+  });
+
+  it("W12: same-hash fast-path with scope:'types' → no operations or summary keys", async () => {
+    const store = new InMemoryStore();
+    const loaded = payloadOf(await loadFile(store, BILLING_V1)) as { spec_id: string; version_id: string };
+    const result = payloadOf(await dv(store, {
+      from: { spec_id: loaded.spec_id, version: loaded.version_id },
+      to: { spec_id: loaded.spec_id, version: loaded.version_id },
+      scope: "types",
+    })) as any;
+    expect(result.ok).toBe(true);
+    expect(result.types).toBeDefined();
+    expect(result.operations).toBeUndefined();
+    expect(result.summary).toBeUndefined();
   });
 
   it("W10: summary line shows version_label when it uniquely identifies the version", async () => {
