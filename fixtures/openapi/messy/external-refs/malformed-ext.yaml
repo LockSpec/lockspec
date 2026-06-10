@@ -1,0 +1,10 @@
+# This file is intentionally not valid YAML.
+# It is referenced as an external $ref target to test that bundle()
+# throws ParserError (code: EPARSER) → parse_error.
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        tags: [unclosed bracket here
+          invalid content

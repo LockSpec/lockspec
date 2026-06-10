@@ -1,0 +1,23 @@
+openapi: "3.1.0"
+# Deliberately omits info.title and info.version to exercise the fallback path:
+#   - missing info.title → load_spec must prompt for explicit spec_id (invalid_input)
+#   - missing info.version → version_label becomes null
+# T5.1a fixture (+ T1.5). Load with explicit spec_id to succeed.
+info:
+  description: This spec has no title and no version — only a description.
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]

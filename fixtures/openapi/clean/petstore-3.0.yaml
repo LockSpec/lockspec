@@ -1,0 +1,78 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.0
+paths:
+  /pets:
+    post:
+      operationId: createPet
+      summary: Create a pet
+      tags: [Pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+    get:
+      operationId: listPets
+      summary: List pets
+      tags: [Pets]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pet'
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      summary: Get a pet
+      tags: [Pets]
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, name]
+      example:
+        id: 1
+        name: Rex
+        status: available
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        tag:
+          type: string
+          nullable: true
+        weight:
+          type: number
+          minimum: 0
+          exclusiveMinimum: true
+        status:
+          type: string
+          enum: [available, pending, sold]

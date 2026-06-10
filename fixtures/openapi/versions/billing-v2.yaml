@@ -1,0 +1,78 @@
+openapi: "3.1.0"
+info:
+  title: "Billing API"
+  version: "2.0.0"
+paths:
+  /v1/invoices:
+    post:
+      operationId: createInvoice
+      summary: Create an invoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer          # type changed: string → integer
+                note:
+                  type: string
+                metadata:
+                  type: object           # new optional field
+                idempotency_key:
+                  type: string           # new required field
+              required:
+                - amount
+                - idempotency_key        # idempotency_key is required
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+    get:
+      operationId: listInvoices
+      summary: List invoices
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invoice"
+  /v1/invoices/{id}:
+    get:
+      operationId: getInvoice          # added operation (GET /v1/invoices/{id})
+      summary: Get an invoice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+    # delete removed
+components:
+  schemas:
+    Invoice:
+      type: object
+      properties:
+        id:
+          type: string
+        amount:
+          type: integer                  # changed: string → integer (types dimension)
+        status:
+          type: string                   # new field (types dimension)
+      required:
+        - id
+        - amount

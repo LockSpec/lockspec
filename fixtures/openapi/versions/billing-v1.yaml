@@ -1,0 +1,66 @@
+openapi: "3.1.0"
+info:
+  title: "Billing API"
+  version: "1.0.0"
+paths:
+  /v1/invoices:
+    post:
+      operationId: createInvoice
+      summary: Create an invoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: string
+                note:
+                  type: string
+              required:
+                - amount
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invoice"
+    get:
+      operationId: listInvoices
+      summary: List invoices
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Invoice"
+  /v1/invoices/{id}:
+    delete:
+      operationId: deleteInvoice
+      summary: Delete an invoice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: No content
+components:
+  schemas:
+    Invoice:
+      type: object
+      properties:
+        id:
+          type: string
+        amount:
+          type: string
+      required:
+        - id
+        - amount

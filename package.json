@@ -1,0 +1,44 @@
+{
+  "name": "lockspec",
+  "version": "1.0.0",
+  "description": "MCP server that gives AI coding agents accurate, version-pinned API context from your OpenAPI contracts.",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/LockSpec/lockspec.git" },
+  "homepage": "https://github.com/LockSpec/lockspec#readme",
+  "bugs": "https://github.com/LockSpec/lockspec/issues",
+  "keywords": ["mcp", "model-context-protocol", "openapi", "api", "ai-agents", "claude", "cursor", "codex", "gemini"],
+  "type": "module",
+  "bin": {
+    "lockspec": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^4.1.8",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.8"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@readme/openapi-parser": "^6.1.2",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "better-sqlite3": "^12.10.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}

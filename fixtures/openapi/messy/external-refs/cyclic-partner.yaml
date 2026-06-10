@@ -1,0 +1,12 @@
+# Partner file for root-cyclic.yaml — cross-references back to root-cyclic.yaml.
+# Not a valid standalone OpenAPI spec; only valid as a $ref target.
+# bundle() internalizes the cross-file cycle, converting it to internal $refs.
+components:
+  schemas:
+    Partner:
+      type: object
+      properties:
+        id:
+          type: string
+        node:
+          $ref: "./root-cyclic.yaml#/components/schemas/Node"

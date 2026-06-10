@@ -1,0 +1,29 @@
+openapi: 3.0.3
+info:
+  title: Vendor Extensions API
+  version: 1.0.0
+  x-logo:
+    url: https://example.com/logo.png
+paths:
+  /things:
+    get:
+      operationId: listThings
+      summary: List things
+      x-internal: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Thing'
+components:
+  schemas:
+    Thing:
+      type: object
+      x-table-name: things
+      properties:
+        id:
+          type: integer
+        name:
+          type: string

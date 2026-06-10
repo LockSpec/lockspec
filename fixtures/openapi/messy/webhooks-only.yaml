@@ -1,0 +1,25 @@
+openapi: "3.1.0"
+# Characterization fixture: a 3.1 spec with webhooks and NO `paths` key. The 3.1
+# spec permits paths-less documents (webhooks-only / components-only); the parser's
+# validate() accepts it (valid:true). Proves the empty-paths rule is NOT
+# over-strict — it only fails when paths AND webhooks AND components are all empty
+# (nothing to index).
+info:
+  title: Webhooks Only
+  version: "1.0.0"
+webhooks:
+  newPet:
+    post:
+      operationId: newPetWebhook
+      summary: Notify of a newly registered pet
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+      responses:
+        "200":
+          description: Acknowledged

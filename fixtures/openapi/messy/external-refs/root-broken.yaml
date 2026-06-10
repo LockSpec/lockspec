@@ -1,0 +1,19 @@
+openapi: "3.1.0"
+info:
+  title: Broken External Ref
+  version: "1.0.0"
+  description: >
+    External $ref points to a file that does not exist.
+    bundle() should throw ResolverError (ioErrorCode: ENOENT) → io_error.
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List pets
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "./does-not-exist.yaml#/components/schemas/Pet"

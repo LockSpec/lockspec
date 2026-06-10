@@ -1,0 +1,76 @@
+openapi: "3.0.3"
+info:
+  title: Missing OperationIds API
+  version: "1.0.0"
+  description: >
+    All operations omit operationId; the indexer must fall back to
+    operation_key (METHOD:path) and never crash. T5.1a / T2.1 fixture.
+paths:
+  /widgets:
+    get:
+      summary: List widgets
+      tags: [Widgets]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Widget"
+    post:
+      summary: Create a widget
+      tags: [Widgets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Widget"
+      responses:
+        "201":
+          description: Created
+  /widgets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get a widget
+      tags: [Widgets]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Widget"
+        "404":
+          description: Not found
+    delete:
+      summary: Delete a widget
+      tags: [Widgets]
+      responses:
+        "204":
+          description: Deleted
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          enum: [red, green, blue]

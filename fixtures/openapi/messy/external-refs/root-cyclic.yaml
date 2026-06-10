@@ -1,0 +1,29 @@
+openapi: "3.1.0"
+info:
+  title: Cyclic External Refs
+  version: "1.0.0"
+  description: >
+    This spec and cyclic-partner.yaml cross-reference each other via external
+    $ref. bundle() handles this gracefully — it internalizes both schemas and
+    converts the cycle to an internal $ref (no hang, no error).
+paths:
+  /nodes:
+    get:
+      operationId: listNodes
+      summary: List nodes
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        id:
+          type: string
+        partner:
+          $ref: "./cyclic-partner.yaml#/components/schemas/Partner"

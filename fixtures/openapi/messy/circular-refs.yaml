@@ -1,0 +1,74 @@
+openapi: 3.1.0
+info:
+  title: Circular
+  version: 1.0.0
+paths:
+  # Case 3: a `~` in the path → exercises RFC 6901 `~0` round-trip (petstore only
+  # had `/` → `~1`). Case 5: a path-level `parameters` shared across both methods.
+  /a~b/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTilde
+      parameters:
+        - name: verbose
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' } # case 1: cycle
+    delete:
+      operationId: deleteTilde
+      responses:
+        '204': { description: No Content }
+  /diamond:
+    get:
+      operationId: getDiamond
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Diamond' } # case 2: DAG
+  /chain:
+    get:
+      operationId: getChain
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chain0' } # case 4: deep chain
+components:
+  schemas:
+    # Case 1: self-referential cycle. Expanding Node → children.items → Node (an
+    # ancestor on the branch) must emit {$circular}, never infinite-expand.
+    Node:
+      type: object
+      properties:
+        id: { type: string }
+        children:
+          type: array
+          items: { $ref: '#/components/schemas/Node' }
+    Leaf:
+      type: object
+      properties:
+        value: { type: string }
+    # Case 2: diamond/DAG — two properties $ref the SAME acyclic schema. Both must
+    # expand, UNtagged (the negative control vs a global visited-set bug).
+    Diamond:
+      type: object
+      properties:
+        left: { $ref: '#/components/schemas/Leaf' }
+        right: { $ref: '#/components/schemas/Leaf' }
+    # Case 4: linear chain — depth-cap (default 6) collapses + records truncated_paths.
+    Chain0: { type: object, properties: { next: { $ref: '#/components/schemas/Chain1' } } }
+    Chain1: { type: object, properties: { next: { $ref: '#/components/schemas/Chain2' } } }
+    Chain2: { type: object, properties: { next: { $ref: '#/components/schemas/Chain3' } } }
+    Chain3: { type: object, properties: { value: { type: string } } }

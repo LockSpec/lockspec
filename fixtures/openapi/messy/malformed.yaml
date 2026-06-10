@@ -1,0 +1,8 @@
+# This file is intentionally not valid YAML.
+# It exercises: parse_error with location, no server crash.
+# T5.1a / T5.3 fixture.
+openapi: "3.0.3"
+info:
+  title: Malformed
+  version: [unclosed bracket
+    keeps going here

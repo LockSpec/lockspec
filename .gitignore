@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# Editor / tooling local settings
+.claude/
+.vscode
+
+# Local LockSpec store (normally lives at ~/.lockspec/, but ignore defensively
+# in case a local store ever lands in the working tree)
+.lockspec/
